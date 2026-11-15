@@ -27,7 +27,7 @@ jobs:
           set +o pipefail
           yes | sdkmanager --licenses > /dev/null
           set -o pipefail
-          sdkmanager 'platforms;android-37' 'build-tools;37.0.0'
+          sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0'
       - name: Check and build optimized release
         run: |
           chmod +x gradlew

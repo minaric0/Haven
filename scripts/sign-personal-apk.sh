@@ -12,7 +12,6 @@ java -jar "$signer_jar" sign \
   --ks "$backup_dir/haven-personal-release.jks" \
   --ks-key-alias haven-personal \
   --ks-pass "file:$backup_dir/keystore-password.txt" \
-  --key-pass "file:$backup_dir/keystore-password.txt" \
   --v4-signing-enabled false \
   --out "$output_apk" "$unsigned_apk"
 java -jar "$signer_jar" verify --verbose --print-certs "$output_apk"

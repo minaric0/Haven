@@ -49,8 +49,8 @@ android {
     namespace = 'io.github.kennethchoinfosec.haven'
 }
 
-// Never produce a release APK that Android will sign with a temporary debug key or leave
-// unsigned. Debug builds remain available without the private release credentials.
+// Release signing is required by default. The explicit unsigned export is for
+// building in CI and signing privately; it never substitutes a debug signing key.
 tasks.configureEach { task ->
     if (task.name == 'packageRelease' || task.name == 'bundleRelease') {
         task.doFirst {

@@ -103,15 +103,15 @@ public class HavenService extends Service {
                     }
                 }
                 list.sort((x, y) -> {
-                            // Sort hidden apps at the last
-                            if (x.isHidden() && !y.isHidden()) {
-                                return 1;
-                            } else if (!x.isHidden() && y.isHidden()) {
-                                return -1;
-                            } else {
-                                return x.getLabel().compareTo(y.getLabel());
-                            }
-                        });
+                    // Sort hidden apps at the last.
+                    if (x.isHidden() && !y.isHidden()) {
+                        return 1;
+                    } else if (!x.isHidden() && y.isHidden()) {
+                        return -1;
+                    } else {
+                        return x.getLabel().compareTo(y.getLabel());
+                    }
+                });
 
                 try {
                     callback.callback(list);

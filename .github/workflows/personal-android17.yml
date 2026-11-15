@@ -79,9 +79,9 @@ jobs:
       - name: Verify original crash and fixed behavior on Android 17
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 37
+          api-level: '37.0'
           arch: x86_64
-          target: google_apis
+          target: google_apis_ps16k
           profile: pixel_6
           disable-animations: true
           script: bash scripts/verify-personal-runtime.sh

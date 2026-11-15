@@ -12,8 +12,8 @@ android {
         applicationId = "io.github.kennethchoinfosec.haven"
         minSdk = 24
         targetSdk = 37
-        versionCode = 9
-        versionName = "0.1.5"
+        versionCode = 10
+        versionName = "0.1.5-sm-a175n.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {
@@ -54,7 +54,8 @@ android {
 tasks.configureEach { task ->
     if (task.name == 'packageRelease' || task.name == 'bundleRelease') {
         task.doFirst {
-            if (releaseKeystoreProperties.isEmpty()) {
+            if (releaseKeystoreProperties.isEmpty()
+                    && !providers.gradleProperty('allowUnsignedRelease').map { it == 'true' }.getOrElse(false)) {
                 throw new GradleException('Release signing is required. Configure release/keystore.properties; see docs/RELEASING.md.')
             }
         }

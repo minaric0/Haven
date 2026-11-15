@@ -1,0 +1,92 @@
+name: Personal Android 17 release
+
+on:
+  push:
+    branches: [codex/haven-sm-a175n-android17]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android 17 build packages
+        run: |
+          sdkmanager 'platforms;android-37' 'build-tools;37.0.0'
+      - name: Check and build optimized release
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --max-workers=2 -Dorg.gradle.jvmargs='-Xmx4g' testDebugUnitTest lintRelease assembleDebug assembleDebugAndroidTest assembleRelease -PallowUnsignedRelease=true
+          mkdir -p out/apk out/tools/lib64 out/reports
+          cp app/build/outputs/apk/release/*-unsigned.apk out/apk/haven-release-unsigned.apk
+          cp app/build/outputs/apk/debug/*.apk out/apk/haven-debug.apk
+          cp app/build/outputs/apk/androidTest/debug/*.apk out/apk/haven-tests.apk
+          cp "$ANDROID_HOME/build-tools/37.0.0/lib/apksigner.jar" out/tools/
+          cp "$ANDROID_HOME/build-tools/37.0.0/zipalign" "$ANDROID_HOME/build-tools/37.0.0/aapt2" out/tools/
+          cp "$ANDROID_HOME/build-tools/37.0.0/lib64/"*.so out/tools/lib64/ || true
+          cp -r app/build/reports/* out/reports/
+          cp -r app/build/outputs/mapping/release out/mapping
+          git rev-parse HEAD > out/source-commit.txt
+          sha256sum out/apk/haven-release-unsigned.apk > out/unsigned-apk.sha256
+      - name: Build original layout regression specimen
+        run: |
+          cp app/src/main/res/layout/activity_settings.xml /tmp/settings-fixed.xml
+          trap 'cp /tmp/settings-fixed.xml app/src/main/res/layout/activity_settings.xml; rm -f app/src/main/res/values/settings_regression_ids.xml' EXIT
+          sed -i '/android:id="@+id\/settings_container"/d' app/src/main/res/layout/activity_settings.xml
+          echo '<resources><item type="id" name="settings_container"/></resources>' > app/src/main/res/values/settings_regression_ids.xml
+          ./gradlew --no-daemon --max-workers=2 -Dorg.gradle.jvmargs='-Xmx4g' assembleDebug
+          cp app/build/outputs/apk/debug/*.apk out/apk/haven-issue21-baseline.apk
+      - name: Export unsigned APK and verification inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: haven-android17-build
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
+
+  runtime-tests:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: haven-android17-build
+          path: out
+      - name: Enable emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Verify original crash and fixed behavior on Android 17
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 37
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          disable-animations: true
+          script: bash scripts/verify-personal-runtime.sh
+      - name: Export runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: haven-android17-runtime-tests
+          path: runtime-evidence/
+          if-no-files-found: warn
+          retention-days: 30

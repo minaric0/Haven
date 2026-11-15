@@ -5,6 +5,7 @@ import android.graphics.drawable.Drawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.RemoteException;
+import android.util.LruCache;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -29,6 +30,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 public class AppListAdapter extends RecyclerView.Adapter<AppListAdapter.ViewHolder> {
@@ -40,6 +42,7 @@ public class AppListAdapter extends RecyclerView.Adapter<AppListAdapter.ViewHold
         // This text view shows the order of all selected items
         private TextView mSelectOrder;
         int mIndex = -1;
+        private String mBoundPackage;
         ViewHolder(View view) {
             super(view);
             mCard = view.findViewById(R.id.list_app_card);
@@ -165,12 +168,14 @@ public class AppListAdapter extends RecyclerView.Adapter<AppListAdapter.ViewHold
 
         void setIndex(final int index) {
             mIndex = index;
+            mBoundPackage = null;
 
             if (mIndex >= 0) {
                 // Clear all animations first
                 mSelectOrder.clearAnimation();
 
                 ApplicationInfoWrapper info = mList.get(mIndex);
+                mBoundPackage = info.getPackageName();
                 mPackage.setText(info.getPackageName());
 
                 if (info.isHidden()) {
@@ -189,27 +194,12 @@ public class AppListAdapter extends RecyclerView.Adapter<AppListAdapter.ViewHold
 
                 // Load the application icon from cache
                 // or populate the cache through the service
-                if (mIconCache.containsKey(info.getPackageName())) {
-                    mIcon.setImageBitmap(mIconCache.get(info.getPackageName()));
+                Bitmap cachedIcon = mIconCache.get(info.getPackageName());
+                if (cachedIcon != null) {
+                    mIcon.setImageBitmap(cachedIcon);
                 } else {
                     mIcon.setImageDrawable(mDefaultIcon);
-
-                    try {
-                        mService.loadIcon(info, new ILoadIconCallback.Stub() {
-                            @Override
-                            public void callback(Bitmap icon) {
-                                if (index == mIndex) {
-                                    mHandler.post(() -> mIcon.setImageBitmap(icon));
-                                }
-
-                                synchronized (AppListAdapter.class) {
-                                    mIconCache.put(info.getPackageName(), icon);
-                                }
-                            }
-                        });
-                    } catch (RemoteException e) {
-                        // Do Nothing
-                    }
+                    requestIcon(info, this);
                 }
             }
         }
@@ -232,11 +222,21 @@ public class AppListAdapter extends RecyclerView.Adapter<AppListAdapter.ViewHold
     // The list of applications that is ACTUALLY displayed
     // (after filtering by search query if applicable)
     private List<ApplicationInfoWrapper> mList = new ArrayList<>();
+    private final List<String> mSearchablePackages = new ArrayList<>();
+    private final List<String> mSearchableLabels = new ArrayList<>();
     private String mSearchQuery = null;
     private IHavenService mService;
     private Drawable mDefaultIcon;
     private String mLabelDisabled;
-    private Map<String, Bitmap> mIconCache = new HashMap<>();
+    // A byte budget is predictable even when packages supply unusually large icons.
+    private final LruCache<String, Bitmap> mIconCache = new LruCache<String, Bitmap>(4 * 1024 * 1024) {
+        @Override
+        protected int sizeOf(String key, Bitmap bitmap) {
+            return bitmap.getAllocationByteCount();
+        }
+    };
+    private final Map<String, List<ViewHolder>> mPendingIcons = new HashMap<>();
+    private int mDataGeneration;
     private ContextMenuHandler mContextMenuHandler = null;
     private ActionModeHandler mActionModeHandler = null;
     private ActionModeCancelHandler mActionModeCancelHandler = null;
@@ -292,16 +292,31 @@ public class AppListAdapter extends RecyclerView.Adapter<AppListAdapter.ViewHold
     }
 
     void setData(List<ApplicationInfoWrapper> apps) {
+        mDataGeneration++;
         mOrigList.clear();
         mList.clear();
-        mIconCache.clear();
+        mIconCache.evictAll();
+        mPendingIcons.clear();
+        mSearchablePackages.clear();
+        mSearchableLabels.clear();
         mOrigList.addAll(apps);
+        for (ApplicationInfoWrapper app : apps) {
+            mSearchablePackages.add(app.getPackageName().toLowerCase(Locale.ROOT));
+            mSearchableLabels.add(app.getLabel().toLowerCase(Locale.ROOT));
+        }
         notifyChange();
     }
 
     // null = clear search query
     void setSearchQuery(String query) {
-        mSearchQuery = query == null ? null : query.toLowerCase(Locale.ROOT).trim();
+        String normalized = query == null ? null : query.toLowerCase(Locale.ROOT).trim();
+        if (normalized != null && normalized.isEmpty()) {
+            normalized = null;
+        }
+        if (Objects.equals(mSearchQuery, normalized)) {
+            return;
+        }
+        mSearchQuery = normalized;
         notifyChange();
     }
 
@@ -313,13 +328,55 @@ public class AppListAdapter extends RecyclerView.Adapter<AppListAdapter.ViewHold
             mList.addAll(mOrigList);
         } else {
             // Filter by search query
-            mList.addAll(mOrigList.stream()
-                    .filter((app) ->
-                            app.getPackageName().toLowerCase(Locale.ROOT).contains(mSearchQuery)
-                                    || app.getLabel().toLowerCase(Locale.ROOT).contains(mSearchQuery))
-                    .collect(Collectors.toList()));
+            for (int i = 0; i < mOrigList.size(); i++) {
+                if (mSearchablePackages.get(i).contains(mSearchQuery)
+                        || mSearchableLabels.get(i).contains(mSearchQuery)) {
+                    mList.add(mOrigList.get(i));
+                }
+            }
         }
         notifyDataSetChanged();
+    }
+
+    private void requestIcon(ApplicationInfoWrapper info, ViewHolder holder) {
+        String packageName = info.getPackageName();
+        List<ViewHolder> pending = mPendingIcons.get(packageName);
+        if (pending != null) {
+            if (!pending.contains(holder)) {
+                pending.add(holder);
+            }
+            return;
+        }
+        List<ViewHolder> waiting = new ArrayList<>();
+        waiting.add(holder);
+        mPendingIcons.put(packageName, waiting);
+        final int generation = mDataGeneration;
+        try {
+            mService.loadIcon(info, new ILoadIconCallback.Stub() {
+                @Override
+                public void callback(Bitmap icon) {
+                    // Binder callbacks run off the UI thread. Check the binding only
+                    // after posting, since rows may have been recycled in the meantime.
+                    mHandler.post(() -> {
+                        if (generation != mDataGeneration) {
+                            return;
+                        }
+                        List<ViewHolder> holders = mPendingIcons.remove(packageName);
+                        if (icon == null || holders == null) {
+                            return;
+                        }
+                        mIconCache.put(packageName, icon);
+                        for (ViewHolder target : holders) {
+                            if (packageName.equals(target.mBoundPackage)) {
+                                target.mIcon.setImageBitmap(icon);
+                            }
+                        }
+                    });
+                }
+            });
+        } catch (RemoteException e) {
+            mPendingIcons.remove(packageName);
+        }
     }
 
     @Override
@@ -335,9 +392,7 @@ public class AppListAdapter extends RecyclerView.Adapter<AppListAdapter.ViewHold
         }
         LayoutInflater inflater = LayoutInflater.from(viewGroup.getContext());
         View view = inflater.inflate(R.layout.app_list_item, viewGroup, false);
-        ViewHolder vh = new ViewHolder(view);
-        vh.setIndex(i);
-        return vh;
+        return new ViewHolder(view);
     }
 
     @Override

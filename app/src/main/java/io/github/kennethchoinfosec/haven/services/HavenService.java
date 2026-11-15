@@ -9,6 +9,7 @@ import android.content.RestrictionEntry;
 import android.content.RestrictionsManager;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
@@ -31,7 +32,8 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.stream.Collectors;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class HavenService extends Service {
     public static final int RESULT_CANNOT_INSTALL_SYSTEM_APP = 100001;
@@ -41,6 +43,9 @@ public class HavenService extends Service {
     private boolean mIsProfileOwner = false;
     private PackageManager mPackageManager = null;
     private ComponentName mAdminComponent = null;
+    // Keep list scans separate from icon decoding so scrolling cannot stall a refresh.
+    private final ExecutorService mAppListExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService mIconExecutor = Executors.newFixedThreadPool(2);
     // When we need to start an activity, we need something else to do it for us
     // as per background limitation of Android 10
     // We mostly need this for app cloning / installation
@@ -78,23 +83,26 @@ public class HavenService extends Service {
 
         @Override
         public void getApps(IGetAppsCallback callback, boolean showAll) {
-            new Thread(() -> {
+            mAppListExecutor.execute(() -> {
                 int pmFlags = PackageManager.MATCH_DISABLED_COMPONENTS | PackageManager.MATCH_UNINSTALLED_PACKAGES;
-                List<ApplicationInfoWrapper> list = getInstalledApplications(pmFlags)
-                        .stream()
-                        .filter((it) -> !it.packageName.equals(getPackageName()))
-                        .filter((it) -> {
-                            boolean isSystem = (it.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
-                            boolean isHidden = isHidden(it.packageName);
-                            boolean isInstalled = (it.flags & ApplicationInfo.FLAG_INSTALLED) != 0;
-                            boolean canLaunch = mPackageManager.getLaunchIntentForPackage(it.packageName) != null;
-
-                            return showAll || (!isSystem && isInstalled) || isHidden || canLaunch;
-                        })
-                        .map(ApplicationInfoWrapper::new)
-                        .map((it) -> it.loadLabel(mPackageManager)
-                                .setHidden(isHidden(it.getPackageName())))
-                        .sorted((x, y) -> {
+                // getLaunchIntentForPackage queries INFO and LAUNCHER for every package.
+                // Query each category once instead, retaining the same visibility rules.
+                Set<String> launchablePackages = showAll ? null : getLaunchablePackages();
+                List<ApplicationInfoWrapper> list = new ArrayList<>();
+                for (ApplicationInfo info : getInstalledApplications(pmFlags)) {
+                    if (info.packageName.equals(getPackageName())) {
+                        continue;
+                    }
+                    boolean hidden = isHidden(info.packageName);
+                    boolean isSystem = (info.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+                    boolean isInstalled = (info.flags & ApplicationInfo.FLAG_INSTALLED) != 0;
+                    if (showAll || (!isSystem && isInstalled) || hidden
+                            || launchablePackages.contains(info.packageName)) {
+                        list.add(new ApplicationInfoWrapper(info).loadLabel(mPackageManager)
+                                .setHidden(hidden));
+                    }
+                }
+                list.sort((x, y) -> {
                             // Sort hidden apps at the last
                             if (x.isHidden() && !y.isHidden()) {
                                 return 1;
@@ -103,20 +111,19 @@ public class HavenService extends Service {
                             } else {
                                 return x.getLabel().compareTo(y.getLabel());
                             }
-                        })
-                        .collect(Collectors.toList());
+                        });
 
                 try {
                     callback.callback(list);
                 } catch (RemoteException e) {
                     // Do Nothing
                 }
-            }).start();
+            });
         }
 
         @Override
         public void loadIcon(ApplicationInfoWrapper info, ILoadIconCallback callback) {
-            new Thread(() -> {
+            mIconExecutor.execute(() -> {
                 Bitmap icon = Utility.drawableToBitmap(info.getInfo().loadUnbadgedIcon(mPackageManager));
 
                 try {
@@ -124,7 +131,7 @@ public class HavenService extends Service {
                 } catch (RemoteException e) {
                     // Do Nothing
                 }
-            }).start();
+            });
         }
 
         @Override
@@ -345,10 +352,30 @@ public class HavenService extends Service {
 
     @Override
     public void onCreate() {
+        super.onCreate();
         mPolicyManager = getSystemService(DevicePolicyManager.class);
         mPackageManager = getPackageManager();
         mIsProfileOwner = mPolicyManager.isProfileOwnerApp(getPackageName());
         mAdminComponent = new ComponentName(getApplicationContext(), HavenDeviceAdminReceiver.class);
+    }
+
+    @Override
+    public void onDestroy() {
+        mAppListExecutor.shutdownNow();
+        mIconExecutor.shutdownNow();
+        super.onDestroy();
+    }
+
+    @SuppressWarnings("deprecation")
+    private Set<String> getLaunchablePackages() {
+        Set<String> packages = new HashSet<>();
+        for (String category : new String[]{Intent.CATEGORY_INFO, Intent.CATEGORY_LAUNCHER}) {
+            Intent intent = new Intent(Intent.ACTION_MAIN).addCategory(category);
+            for (ResolveInfo activity : mPackageManager.queryIntentActivities(intent, 0)) {
+                packages.add(activity.activityInfo.packageName);
+            }
+        }
+        return packages;
     }
 
     @SuppressWarnings("deprecation")
